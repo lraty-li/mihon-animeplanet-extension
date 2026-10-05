@@ -88,7 +88,7 @@ abstract class AnimePlanet : KeiSource() {
     private suspend fun resolveMangaDexAliases(query: String): List<String> {
         val url = MANGADEX_API.toHttpUrl().newBuilder()
             .addQueryParameter("title", query)
-            .addQueryParameter("limit", "5")
+            .addQueryParameter("limit", "1")
             .build()
 
         val data = client.get(url)
@@ -96,24 +96,27 @@ abstract class AnimePlanet : KeiSource() {
             ?.jsonArray
             ?: return emptyList()
 
-        return data.flatMap { item ->
-            val attributes = item.jsonObject["attributes"]?.jsonObject ?: return@flatMap emptyList()
-            buildList {
-                attributes["title"]?.jsonObject?.let { addAll(preferredTitles(it)) }
-                attributes["altTitles"]?.jsonArray?.forEach { altTitle ->
-                    addAll(preferredTitles(altTitle.jsonObject))
+        val attributes = data.firstOrNull()
+            ?.jsonObject
+            ?.get("attributes")
+            ?.jsonObject
+            ?: return emptyList()
+
+        val titles = buildList {
+            attributes["title"]?.jsonObject?.let(::add)
+            attributes["altTitles"]?.jsonArray?.forEach { add(it.jsonObject) }
+        }
+
+        val alias = listOf("en", "ja-ro")
+            .firstNotNullOfOrNull { lang ->
+                titles.firstNotNullOfOrNull { title ->
+                    title[lang]?.jsonPrimitive?.contentOrNull
+                        ?.takeIf { it.isNotBlank() && it != query && !it.hasCjk() }
                 }
             }
-        }
-            .filter { it.isNotBlank() && it != query && !it.hasCjk() }
-            .distinct()
-            .take(MAX_RESOLVED_ALIASES)
-    }
 
-    private fun preferredTitles(titles: JsonObject) = listOfNotNull(
-        titles["en"]?.jsonPrimitive?.contentOrNull,
-        titles["ja-ro"]?.jsonPrimitive?.contentOrNull,
-    )
+        return listOfNotNull(alias)
+    }
 
     private suspend fun resolveBangumiAliases(query: String): List<String> {
         val body = buildJsonObject {
