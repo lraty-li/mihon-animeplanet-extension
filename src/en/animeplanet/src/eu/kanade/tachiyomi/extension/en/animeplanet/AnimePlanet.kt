@@ -73,8 +73,8 @@ abstract class AnimePlanet : KeiSource() {
 
     private suspend fun resolveAndSearch(page: Int, query: String): MangasPage? {
         val resolvers: List<suspend (String) -> String?> = listOf(
-            ::resolveMangaDexAlias,
             ::resolveBangumiAlias,
+            ::resolveMangaDexAlias,
         )
 
         for (resolver in resolvers) {
@@ -132,35 +132,39 @@ abstract class AnimePlanet : KeiSource() {
             }
         }.toJsonRequestBody()
 
-        val results = client.post("$BANGUMI_API/search/subjects?limit=1", body)
+        val results = client.post("$BANGUMI_API/search/subjects?limit=5", body)
             .parseAs<JsonObject>()["data"]
             ?.jsonArray
             ?: return null
 
-        val subject = results.firstOrNull() ?: return null
-
-        val id = subject.jsonObject["id"]?.jsonPrimitive?.contentOrNull ?: return null
-        val details = client.get("$BANGUMI_API/subjects/$id").parseAs<JsonObject>()
-        val infobox = details["infobox"]?.jsonArray ?: return null
-
-        return infobox.asSequence().flatMap { item ->
-            val entry = item.jsonObject
-            val key = entry["key"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            if (key != "别名" && key != "別名") return@flatMap emptySequence()
-
-            when (val value = entry["value"]) {
-                is JsonPrimitive -> value.contentOrNull?.let { sequenceOf(it) } ?: emptySequence()
-                is JsonArray -> value.asSequence().mapNotNull { alias ->
-                    when (alias) {
-                        is JsonPrimitive -> alias.contentOrNull
-                        is JsonObject -> alias["v"]?.jsonPrimitive?.contentOrNull
-                        else -> null
-                    }
+        for (candidate in results) {
+            val subject = candidate.jsonObject
+            val infobox = subject["infobox"]?.jsonArray ?: JsonArray(emptyList())
+            val aliases = infobox
+                .map { it.jsonObject }
+                .filter { entry ->
+                    entry["key"]?.jsonPrimitive?.contentOrNull in setOf("别名", "別名")
                 }
-                else -> emptySequence()
-            }
+                .flatMap(::bangumiValues)
+
+            val name = subject["name"]?.jsonPrimitive?.contentOrNull
+            val exactMatch = buildList {
+                name?.let(::add)
+                subject["name_cn"]?.jsonPrimitive?.contentOrNull?.let(::add)
+                addAll(aliases)
+            }.any { it.equals(query, ignoreCase = true) }
+            if (!exactMatch) continue
+
+            return name
+                ?.takeIf { it.isNotBlank() && it != query && !it.hasCjk() }
+                ?: aliases
+                    .filter { it.isNotBlank() && it != query && !it.hasCjk() }
+                    .minByOrNull(String::length)
+                ?: name?.takeIf { it.isNotBlank() && it != query }
+                ?: aliases.firstOrNull { it.isNotBlank() && it != query }
         }
-            .firstOrNull { it.isNotBlank() && it != query }
+
+        return null
     }
 
     private fun String.hasCjk() = any { char ->
