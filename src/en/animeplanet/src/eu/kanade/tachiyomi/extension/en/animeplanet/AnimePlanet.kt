@@ -119,6 +119,8 @@ abstract class AnimePlanet : KeiSource() {
         return SManga.create().apply {
             setUrlWithoutDomain(path)
             this.title = title
+            genre = "$RECOMMENDATION_SCHEMA${path.substringAfter("/manga/")}"
+            initialized = true
             thumbnail_url = image?.let {
                 it.attr("data-src").takeIf(String::isNotBlank)
                     ?: it.attr("data-original").takeIf(String::isNotBlank)
