@@ -86,15 +86,9 @@ abstract class AnimePlanet : KeiSource() {
         )
     }
 
-    private fun parseMangaCards(document: Document): List<SManga> {
-        val cards = document.select("li.card, .cardDeck .card, .cardGrid .card")
-            .mapNotNull(::mangaFromElement)
-            .distinctBy { it.url }
-
-        if (cards.isNotEmpty()) return cards
-
-        return parseMangaLinks(document)
-    }
+    private fun parseMangaCards(document: Document): List<SManga> = document.select("li.card, .cardDeck .card, .cardGrid .card")
+        .mapNotNull(::mangaFromElement)
+        .distinctBy { it.url }
 
     private fun parseMangaLinks(document: Document): List<SManga> = document.select("a[href^=/manga/]")
         .mapNotNull(::mangaFromElement)
