@@ -278,7 +278,10 @@ abstract class AnimePlanet : KeiSource() {
         }
 
         if (manga.title.isNotBlank() && manga.genre.orEmpty().contains(RECOMMENDATION_SCHEMA)) {
-            resolveChineseTitle(manga.title)?.let { manga.title = it }
+            val metadata = resolveRecommendationMetadata(manga.title)
+            metadata.title?.let { manga.title = it }
+            metadata.author?.let { manga.author = it }
+            metadata.artist?.let { manga.artist = it }
             return SMangaUpdate(manga, emptyList())
         }
 
@@ -352,20 +355,19 @@ abstract class AnimePlanet : KeiSource() {
         return SMangaUpdate(updated, emptyList())
     }
 
-    private suspend fun resolveChineseTitle(title: String): String? {
-        val resolvers: List<suspend (String) -> String?> = listOf(
-            ::resolveMangaDexChineseTitle,
-            ::resolveBangumiChineseTitle,
+    private suspend fun resolveRecommendationMetadata(title: String): RecommendationMetadata {
+        val mangaDex = resolveMangaDexMetadata(title)
+        if (mangaDex.title != null && mangaDex.author != null) return mangaDex
+
+        val bangumi = resolveBangumiMetadata(title, fetchCreators = mangaDex.author == null)
+        return RecommendationMetadata(
+            title = mangaDex.title ?: bangumi.title,
+            author = mangaDex.author ?: bangumi.author,
+            artist = mangaDex.artist ?: bangumi.artist,
         )
-
-        for (resolver in resolvers) {
-            resolver(title)?.let { return it }
-        }
-
-        return null
     }
 
-    private suspend fun resolveBangumiChineseTitle(title: String): String? {
+    private suspend fun resolveBangumiMetadata(title: String, fetchCreators: Boolean): RecommendationMetadata {
         val body = buildJsonObject {
             put("keyword", title)
             put("sort", "match")
@@ -391,27 +393,68 @@ abstract class AnimePlanet : KeiSource() {
                 ?.contentOrNull
                 ?.equals(title, ignoreCase = true) == true
 
-        if (!matched) return null
+        if (!matched) return RecommendationMetadata()
 
-        return subject["name_cn"]
+        val chineseTitle = subject["name_cn"]
             ?.jsonPrimitive
             ?.contentOrNull
             ?.takeIf { it.isNotBlank() && it != title }
+
+        if (!fetchCreators) return RecommendationMetadata(title = chineseTitle)
+
+        val id = subject["id"]?.jsonPrimitive?.contentOrNull
+            ?: return RecommendationMetadata(title = chineseTitle)
+        val infobox = client.get("$BANGUMI_API/subjects/$id")
+            .parseAs<JsonObject>()["infobox"]
+            ?.jsonArray
+            ?: return RecommendationMetadata(title = chineseTitle)
+
+        val authors = mutableListOf<String>()
+        val artists = mutableListOf<String>()
+        infobox.forEach { item ->
+            val entry = item.jsonObject
+            val key = entry["key"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val values = when (val value = entry["value"]) {
+                is JsonPrimitive -> listOfNotNull(value.contentOrNull)
+                is JsonArray -> value.mapNotNull { creator ->
+                    when (creator) {
+                        is JsonPrimitive -> creator.contentOrNull
+                        is JsonObject -> creator["v"]?.jsonPrimitive?.contentOrNull
+                        else -> null
+                    }
+                }
+                else -> emptyList()
+            }.filter(String::isNotBlank)
+
+            when (key) {
+                "作者", "原作" -> authors += values
+                "作画", "作畫" -> artists += values
+            }
+        }
+
+        return RecommendationMetadata(
+            title = chineseTitle,
+            author = authors.distinct().joinToString(", ").takeIf(String::isNotBlank),
+            artist = artists.distinct().joinToString(", ").takeIf(String::isNotBlank),
+        )
     }
 
-    private suspend fun resolveMangaDexChineseTitle(title: String): String? {
+    private suspend fun resolveMangaDexMetadata(title: String): RecommendationMetadata {
         val url = MANGADEX_API.toHttpUrl().newBuilder()
             .addQueryParameter("title", title)
             .addQueryParameter("limit", "5")
+            .addQueryParameter("includes[]", "author")
+            .addQueryParameter("includes[]", "artist")
             .build()
 
         val candidates = client.get(url)
             .parseAs<JsonObject>()["data"]
             ?.jsonArray
-            ?: return null
+            ?: return RecommendationMetadata()
 
         for (candidate in candidates) {
-            val attributes = candidate.jsonObject["attributes"]?.jsonObject ?: continue
+            val manga = candidate.jsonObject
+            val attributes = manga["attributes"]?.jsonObject ?: continue
             val titles = buildList {
                 attributes["title"]?.jsonObject?.let(::add)
                 attributes["altTitles"]?.jsonArray?.forEach { add(it.jsonObject) }
@@ -424,18 +467,37 @@ abstract class AnimePlanet : KeiSource() {
             }
             if (!exactMatch) continue
 
-            return titles.firstNotNullOfOrNull { localizedTitles ->
+            val chineseTitle = titles.firstNotNullOfOrNull { localizedTitles ->
                 localizedTitles.entries.firstNotNullOfOrNull { (language, value) ->
                     value.jsonPrimitive.contentOrNull
                         ?.takeIf { language.startsWith("zh") && it.isNotBlank() }
                 }
             }
+
+            val relationships = manga["relationships"]?.jsonArray ?: JsonArray(emptyList())
+            fun creatorNames(type: String) = relationships
+                .filter { it.jsonObject["type"]?.jsonPrimitive?.contentOrNull == type }
+                .mapNotNull { it.jsonObject["attributes"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull }
+                .filter(String::isNotBlank)
+                .distinct()
+
+            return RecommendationMetadata(
+                title = chineseTitle,
+                author = creatorNames("author").joinToString(", ").takeIf(String::isNotBlank),
+                artist = creatorNames("artist").joinToString(", ").takeIf(String::isNotBlank),
+            )
         }
 
-        return null
+        return RecommendationMetadata()
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> = emptyList()
+
+    private data class RecommendationMetadata(
+        val title: String? = null,
+        val author: String? = null,
+        val artist: String? = null,
+    )
 
     private companion object {
         const val BANGUMI_API = "https://api.bgm.tv/v0"
