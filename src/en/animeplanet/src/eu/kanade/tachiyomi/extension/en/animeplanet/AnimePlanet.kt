@@ -281,7 +281,9 @@ abstract class AnimePlanet : KeiSource() {
             val metadata = resolveRecommendationMetadata(manga.title)
             metadata.title?.let { manga.title = it }
             metadata.author?.let { manga.author = it }
-            metadata.artist?.let { manga.artist = it }
+            if (metadata.author != null) {
+                manga.artist = metadata.artist.orEmpty()
+            }
             return SMangaUpdate(manga, emptyList())
         }
 
@@ -356,18 +358,18 @@ abstract class AnimePlanet : KeiSource() {
     }
 
     private suspend fun resolveRecommendationMetadata(title: String): RecommendationMetadata {
-        val mangaDex = resolveMangaDexMetadata(title)
-        if (mangaDex.title != null && mangaDex.author != null) return mangaDex
+        val bangumi = resolveBangumiMetadata(title)
+        if (bangumi.title != null && bangumi.author != null) return bangumi
 
-        val bangumi = resolveBangumiMetadata(title, fetchCreators = mangaDex.author == null)
+        val mangaDex = resolveMangaDexMetadata(title)
         return RecommendationMetadata(
-            title = mangaDex.title ?: bangumi.title,
-            author = mangaDex.author ?: bangumi.author,
-            artist = mangaDex.artist ?: bangumi.artist,
+            title = bangumi.title ?: mangaDex.title,
+            author = bangumi.author ?: mangaDex.author,
+            artist = bangumi.artist ?: mangaDex.artist,
         )
     }
 
-    private suspend fun resolveBangumiMetadata(title: String, fetchCreators: Boolean): RecommendationMetadata {
+    private suspend fun resolveBangumiMetadata(title: String): RecommendationMetadata {
         val body = buildJsonObject {
             put("keyword", title)
             put("sort", "match")
@@ -400,12 +402,7 @@ abstract class AnimePlanet : KeiSource() {
             ?.contentOrNull
             ?.takeIf { it.isNotBlank() && it != title }
 
-        if (!fetchCreators) return RecommendationMetadata(title = chineseTitle)
-
-        val id = subject["id"]?.jsonPrimitive?.contentOrNull
-            ?: return RecommendationMetadata(title = chineseTitle)
-        val infobox = client.get("$BANGUMI_API/subjects/$id")
-            .parseAs<JsonObject>()["infobox"]
+        val infobox = subject["infobox"]
             ?.jsonArray
             ?: return RecommendationMetadata(title = chineseTitle)
 
