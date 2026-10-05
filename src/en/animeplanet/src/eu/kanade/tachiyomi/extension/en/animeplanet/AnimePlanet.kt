@@ -8,15 +8,24 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonRequestBody
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -66,6 +75,13 @@ abstract class AnimePlanet : KeiSource() {
             }
         }
 
+        for (alias in resolveBangumiAliases(trimmed)) {
+            val resolved = fetchMangaListing(page = page, query = alias)
+            if (resolved.mangas.isNotEmpty()) {
+                return resolved
+            }
+        }
+
         return direct
     }
 
@@ -98,6 +114,50 @@ abstract class AnimePlanet : KeiSource() {
         titles["en"]?.jsonPrimitive?.contentOrNull,
         titles["ja-ro"]?.jsonPrimitive?.contentOrNull,
     )
+
+    private suspend fun resolveBangumiAliases(query: String): List<String> {
+        val body = buildJsonObject {
+            put("keyword", query)
+            put("sort", "match")
+            putJsonObject("filter") {
+                putJsonArray("type") { add(1) }
+            }
+        }.toJsonRequestBody()
+
+        val results = client.post("$BANGUMI_API/search/subjects?limit=5", body)
+            .parseAs<JsonObject>()["data"]
+            ?.jsonArray
+            ?: return emptyList()
+
+        val subject = results.firstOrNull {
+            it.jsonObject["name_cn"]?.jsonPrimitive?.contentOrNull == query
+        } ?: results.firstOrNull() ?: return emptyList()
+
+        val id = subject.jsonObject["id"]?.jsonPrimitive?.contentOrNull ?: return emptyList()
+        val details = client.get("$BANGUMI_API/subjects/$id").parseAs<JsonObject>()
+        val infobox = details["infobox"]?.jsonArray ?: return emptyList()
+
+        return infobox.flatMap { item ->
+            val entry = item.jsonObject
+            val key = entry["key"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            if (key != "别名" && key != "別名") return@flatMap emptyList()
+
+            when (val value = entry["value"]) {
+                is JsonPrimitive -> listOfNotNull(value.contentOrNull)
+                is JsonArray -> value.mapNotNull { alias ->
+                    when (alias) {
+                        is JsonPrimitive -> alias.contentOrNull
+                        is JsonObject -> alias["v"]?.jsonPrimitive?.contentOrNull
+                        else -> null
+                    }
+                }
+                else -> emptyList()
+            }
+        }
+            .filter { alias -> alias.any { it in 'A'..'Z' || it in 'a'..'z' } }
+            .distinct()
+            .take(MAX_RESOLVED_ALIASES)
+    }
 
     private fun String.hasCjk() = any { char ->
         char.code in 0x3400..0x9FFF || char.code in 0xF900..0xFAFF
@@ -283,6 +343,7 @@ abstract class AnimePlanet : KeiSource() {
     override suspend fun getPageList(chapter: SChapter): List<Page> = emptyList()
 
     private companion object {
+        const val BANGUMI_API = "https://api.bgm.tv/v0"
         const val MANGADEX_API = "https://api.mangadex.org/manga"
         const val MAX_RESOLVED_ALIASES = 4
         const val RECOMMENDATION_SCHEMA = "ap:recommend:"
