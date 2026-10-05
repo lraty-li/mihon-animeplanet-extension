@@ -68,24 +68,25 @@ abstract class AnimePlanet : KeiSource() {
             return direct
         }
 
-        for (alias in resolveMangaDexAliases(trimmed)) {
-            val resolved = fetchMangaListing(page = page, query = alias)
-            if (resolved.mangas.isNotEmpty()) {
-                return resolved
-            }
-        }
-
-        for (alias in resolveBangumiAliases(trimmed)) {
-            val resolved = fetchMangaListing(page = page, query = alias)
-            if (resolved.mangas.isNotEmpty()) {
-                return resolved
-            }
-        }
-
-        return direct
+        return resolveAndSearch(page, trimmed) ?: direct
     }
 
-    private suspend fun resolveMangaDexAliases(query: String): List<String> {
+    private suspend fun resolveAndSearch(page: Int, query: String): MangasPage? {
+        val resolvers: List<suspend (String) -> String?> = listOf(
+            ::resolveMangaDexAlias,
+            ::resolveBangumiAlias,
+        )
+
+        for (resolver in resolvers) {
+            val alias = resolver(query) ?: continue
+            val result = fetchMangaListing(page = page, query = alias)
+            if (result.mangas.isNotEmpty()) return result
+        }
+
+        return null
+    }
+
+    private suspend fun resolveMangaDexAlias(query: String): String? {
         val url = MANGADEX_API.toHttpUrl().newBuilder()
             .addQueryParameter("title", query)
             .addQueryParameter("limit", "1")
@@ -94,20 +95,20 @@ abstract class AnimePlanet : KeiSource() {
         val data = client.get(url)
             .parseAs<JsonObject>()["data"]
             ?.jsonArray
-            ?: return emptyList()
+            ?: return null
 
         val attributes = data.firstOrNull()
             ?.jsonObject
             ?.get("attributes")
             ?.jsonObject
-            ?: return emptyList()
+            ?: return null
 
         val titles = buildList {
             attributes["title"]?.jsonObject?.let(::add)
             attributes["altTitles"]?.jsonArray?.forEach { add(it.jsonObject) }
         }
 
-        val alias = listOf("en", "ja-ro", "ja")
+        return listOf("en", "ja-ro", "ja")
             .firstNotNullOfOrNull { lang ->
                 titles.firstNotNullOfOrNull { title ->
                     title[lang]?.jsonPrimitive?.contentOrNull
@@ -120,11 +121,9 @@ abstract class AnimePlanet : KeiSource() {
                         ?.takeIf { it.isNotBlank() && it != query }
                 }
             }
-
-        return listOfNotNull(alias)
     }
 
-    private suspend fun resolveBangumiAliases(query: String): List<String> {
+    private suspend fun resolveBangumiAlias(query: String): String? {
         val body = buildJsonObject {
             put("keyword", query)
             put("sort", "match")
@@ -133,39 +132,35 @@ abstract class AnimePlanet : KeiSource() {
             }
         }.toJsonRequestBody()
 
-        val results = client.post("$BANGUMI_API/search/subjects?limit=5", body)
+        val results = client.post("$BANGUMI_API/search/subjects?limit=1", body)
             .parseAs<JsonObject>()["data"]
             ?.jsonArray
-            ?: return emptyList()
+            ?: return null
 
-        val subject = results.firstOrNull {
-            it.jsonObject["name_cn"]?.jsonPrimitive?.contentOrNull == query
-        } ?: results.firstOrNull() ?: return emptyList()
+        val subject = results.firstOrNull() ?: return null
 
-        val id = subject.jsonObject["id"]?.jsonPrimitive?.contentOrNull ?: return emptyList()
+        val id = subject.jsonObject["id"]?.jsonPrimitive?.contentOrNull ?: return null
         val details = client.get("$BANGUMI_API/subjects/$id").parseAs<JsonObject>()
-        val infobox = details["infobox"]?.jsonArray ?: return emptyList()
+        val infobox = details["infobox"]?.jsonArray ?: return null
 
-        return infobox.flatMap { item ->
+        return infobox.asSequence().flatMap { item ->
             val entry = item.jsonObject
             val key = entry["key"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            if (key != "别名" && key != "別名") return@flatMap emptyList()
+            if (key != "别名" && key != "別名") return@flatMap emptySequence()
 
             when (val value = entry["value"]) {
-                is JsonPrimitive -> listOfNotNull(value.contentOrNull)
-                is JsonArray -> value.mapNotNull { alias ->
+                is JsonPrimitive -> value.contentOrNull?.let { sequenceOf(it) } ?: emptySequence()
+                is JsonArray -> value.asSequence().mapNotNull { alias ->
                     when (alias) {
                         is JsonPrimitive -> alias.contentOrNull
                         is JsonObject -> alias["v"]?.jsonPrimitive?.contentOrNull
                         else -> null
                     }
                 }
-                else -> emptyList()
+                else -> emptySequence()
             }
         }
-            .filter { it.isNotBlank() && it != query }
-            .distinct()
-            .take(MAX_RESOLVED_ALIASES)
+            .firstOrNull { it.isNotBlank() && it != query }
     }
 
     private fun String.hasCjk() = any { char ->
@@ -357,7 +352,6 @@ abstract class AnimePlanet : KeiSource() {
     private companion object {
         const val BANGUMI_API = "https://api.bgm.tv/v0"
         const val MANGADEX_API = "https://api.mangadex.org/manga"
-        const val MAX_RESOLVED_ALIASES = 4
         const val RECOMMENDATION_SCHEMA = "ap:recommend:"
         val MANGA_PATH_REGEX = Regex("^/manga/[a-z0-9][a-z0-9-]*$", RegexOption.IGNORE_CASE)
         val PERSON_ROLE_SUFFIX_REGEX = Regex("\\s+(?:Author & Artist|Author|Artist)$", RegexOption.IGNORE_CASE)
