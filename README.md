@@ -75,8 +75,8 @@ src/en/animeplanet/build/outputs/apk/debug/
 Releases are tag-driven. Pushing a tag beginning with `v` builds the release APK and publishes it to the matching GitHub Release:
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.6.1
+git push origin v1.6.1
 ```
 
 Regular pushes to `main` do not publish a release.
