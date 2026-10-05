@@ -11,6 +11,12 @@ import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.parseAs
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -48,7 +54,53 @@ abstract class AnimePlanet : KeiSource() {
             return fetchRecommendations(slug)
         }
 
-        return fetchMangaListing(page = page, query = trimmed)
+        val direct = fetchMangaListing(page = page, query = trimmed)
+        if (direct.mangas.isNotEmpty() || !trimmed.hasCjk()) {
+            return direct
+        }
+
+        for (alias in resolveMangaDexAliases(trimmed)) {
+            val resolved = fetchMangaListing(page = page, query = alias)
+            if (resolved.mangas.isNotEmpty()) {
+                return resolved
+            }
+        }
+
+        return direct
+    }
+
+    private suspend fun resolveMangaDexAliases(query: String): List<String> {
+        val url = MANGADEX_API.toHttpUrl().newBuilder()
+            .addQueryParameter("title", query)
+            .addQueryParameter("limit", "5")
+            .build()
+
+        val data = client.get(url)
+            .parseAs<JsonObject>()["data"]
+            ?.jsonArray
+            ?: return emptyList()
+
+        return data.flatMap { item ->
+            val attributes = item.jsonObject["attributes"]?.jsonObject ?: return@flatMap emptyList()
+            buildList {
+                attributes["title"]?.jsonObject?.let { addAll(preferredTitles(it)) }
+                attributes["altTitles"]?.jsonArray?.forEach { altTitle ->
+                    addAll(preferredTitles(altTitle.jsonObject))
+                }
+            }
+        }
+            .filter { it.isNotBlank() && it != query && !it.hasCjk() }
+            .distinct()
+            .take(MAX_RESOLVED_ALIASES)
+    }
+
+    private fun preferredTitles(titles: JsonObject) = listOfNotNull(
+        titles["en"]?.jsonPrimitive?.contentOrNull,
+        titles["ja-ro"]?.jsonPrimitive?.contentOrNull,
+    )
+
+    private fun String.hasCjk() = any { char ->
+        char.code in 0x3400..0x9FFF || char.code in 0xF900..0xFAFF
     }
 
     private suspend fun fetchMangaListing(page: Int, query: String?): MangasPage {
@@ -231,6 +283,8 @@ abstract class AnimePlanet : KeiSource() {
     override suspend fun getPageList(chapter: SChapter): List<Page> = emptyList()
 
     private companion object {
+        const val MANGADEX_API = "https://api.mangadex.org/manga"
+        const val MAX_RESOLVED_ALIASES = 4
         const val RECOMMENDATION_SCHEMA = "ap:recommend:"
         val MANGA_PATH_REGEX = Regex("^/manga/[a-z0-9][a-z0-9-]*$", RegexOption.IGNORE_CASE)
         val PERSON_ROLE_SUFFIX_REGEX = Regex("\\s+(?:Author & Artist|Author|Artist)$", RegexOption.IGNORE_CASE)
