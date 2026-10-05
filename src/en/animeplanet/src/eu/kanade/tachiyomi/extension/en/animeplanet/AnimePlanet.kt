@@ -39,10 +39,6 @@ abstract class AnimePlanet : KeiSource() {
     ): MangasPage {
         val trimmed = query.trim()
 
-        if (trimmed.isEmpty()) {
-            return MangasPage(emptyList(), hasNextPage = false)
-        }
-
         if (trimmed.startsWith(RECOMMENDATION_SCHEMA)) {
             val slug = trimmed.removePrefix(RECOMMENDATION_SCHEMA)
             if (slug.isBlank()) {
