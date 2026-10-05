@@ -281,6 +281,7 @@ abstract class AnimePlanet : KeiSource() {
             val metadata = resolveRecommendationMetadata(manga.title)
             metadata.title?.let { manga.title = it }
             metadata.author?.let { manga.author = it }
+            metadata.thumbnailUrl?.let { manga.thumbnail_url = it }
             if (metadata.author != null) {
                 manga.artist = metadata.artist.orEmpty()
             }
@@ -396,6 +397,12 @@ abstract class AnimePlanet : KeiSource() {
                 ?.jsonPrimitive
                 ?.contentOrNull
                 ?.takeIf { it.isNotBlank() && it != title }
+            val thumbnailUrl = (subject["images"] as? JsonObject)?.let { images ->
+                listOf("common", "large", "medium", "small")
+                    .firstNotNullOfOrNull { size ->
+                        images[size]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
+                    }
+            }
 
             val authors = mutableListOf<String>()
             val artists = mutableListOf<String>()
@@ -411,6 +418,7 @@ abstract class AnimePlanet : KeiSource() {
                 title = chineseTitle,
                 author = authors.distinct().joinToString(", ").takeIf(String::isNotBlank),
                 artist = artists.distinct().joinToString(", ").takeIf(String::isNotBlank),
+                thumbnailUrl = thumbnailUrl,
             )
         }
 
@@ -435,6 +443,7 @@ abstract class AnimePlanet : KeiSource() {
             .addQueryParameter("limit", "5")
             .addQueryParameter("includes[]", "author")
             .addQueryParameter("includes[]", "artist")
+            .addQueryParameter("includes[]", "cover_art")
             .build()
 
         val candidates = client.get(url)
@@ -471,10 +480,26 @@ abstract class AnimePlanet : KeiSource() {
                 .filter(String::isNotBlank)
                 .distinct()
 
+            val mangaId = manga["id"]?.jsonPrimitive?.contentOrNull
+            val coverFile = relationships
+                .firstOrNull { it.jsonObject["type"]?.jsonPrimitive?.contentOrNull == "cover_art" }
+                ?.jsonObject
+                ?.get("attributes")
+                ?.jsonObject
+                ?.get("fileName")
+                ?.jsonPrimitive
+                ?.contentOrNull
+            val thumbnailUrl = if (mangaId != null && coverFile != null) {
+                "$MANGADEX_UPLOADS/covers/$mangaId/$coverFile"
+            } else {
+                null
+            }
+
             return RecommendationMetadata(
                 title = chineseTitle,
                 author = creatorNames("author").joinToString(", ").takeIf(String::isNotBlank),
                 artist = creatorNames("artist").joinToString(", ").takeIf(String::isNotBlank),
+                thumbnailUrl = thumbnailUrl,
             )
         }
 
@@ -487,11 +512,13 @@ abstract class AnimePlanet : KeiSource() {
         val title: String? = null,
         val author: String? = null,
         val artist: String? = null,
+        val thumbnailUrl: String? = null,
     )
 
     private companion object {
         const val BANGUMI_API = "https://api.bgm.tv/v0"
         const val MANGADEX_API = "https://api.mangadex.org/manga"
+        const val MANGADEX_UPLOADS = "https://uploads.mangadex.org"
         const val RECOMMENDATION_SCHEMA = "ap:recommend:"
         val MANGA_PATH_REGEX = Regex("^/manga/[a-z0-9][a-z0-9-]*$", RegexOption.IGNORE_CASE)
         val PERSON_ROLE_SUFFIX_REGEX = Regex("\\s+(?:Author & Artist|Author|Artist)$", RegexOption.IGNORE_CASE)
