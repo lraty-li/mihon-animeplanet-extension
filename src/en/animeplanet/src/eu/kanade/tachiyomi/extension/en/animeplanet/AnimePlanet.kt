@@ -357,19 +357,11 @@ abstract class AnimePlanet : KeiSource() {
         return SMangaUpdate(updated, emptyList())
     }
 
-    private suspend fun resolveRecommendationMetadata(title: String): RecommendationMetadata {
-        val bangumi = resolveBangumiMetadata(title)
-        if (bangumi.title != null && bangumi.author != null) return bangumi
+    private suspend fun resolveRecommendationMetadata(title: String): RecommendationMetadata = resolveBangumiMetadata(title)
+        ?: resolveMangaDexMetadata(title)
+        ?: RecommendationMetadata()
 
-        val mangaDex = resolveMangaDexMetadata(title)
-        return RecommendationMetadata(
-            title = bangumi.title ?: mangaDex.title,
-            author = bangumi.author ?: mangaDex.author,
-            artist = bangumi.artist ?: mangaDex.artist,
-        )
-    }
-
-    private suspend fun resolveBangumiMetadata(title: String): RecommendationMetadata {
+    private suspend fun resolveBangumiMetadata(title: String): RecommendationMetadata? {
         val body = buildJsonObject {
             put("keyword", title)
             put("sort", "match")
@@ -378,65 +370,66 @@ abstract class AnimePlanet : KeiSource() {
             }
         }.toJsonRequestBody()
 
-        val subject = client.post("$BANGUMI_API/search/subjects?limit=1", body)
+        val subjects = client.post("$BANGUMI_API/search/subjects?limit=5", body)
             .parseAs<JsonObject>()["data"]
             ?.jsonArray
-            ?.firstOrNull()
-            ?.jsonObject
+            ?: return null
 
-        val matched = subject
-            ?.get("name")
-            ?.jsonPrimitive
-            ?.contentOrNull
-            ?.equals(title, ignoreCase = true) == true ||
-            subject
-                ?.get("name_cn")
+        for (candidate in subjects) {
+            val subject = candidate.jsonObject
+            val infobox = subject["infobox"]?.jsonArray ?: JsonArray(emptyList())
+            val aliases = infobox
+                .map { it.jsonObject }
+                .filter { entry ->
+                    entry["key"]?.jsonPrimitive?.contentOrNull in setOf("别名", "別名")
+                }
+                .flatMap(::bangumiValues)
+
+            val exactMatch = buildList {
+                subject["name"]?.jsonPrimitive?.contentOrNull?.let(::add)
+                subject["name_cn"]?.jsonPrimitive?.contentOrNull?.let(::add)
+                addAll(aliases)
+            }.any { it.equals(title, ignoreCase = true) }
+            if (!exactMatch) continue
+
+            val chineseTitle = subject["name_cn"]
                 ?.jsonPrimitive
                 ?.contentOrNull
-                ?.equals(title, ignoreCase = true) == true
+                ?.takeIf { it.isNotBlank() && it != title }
 
-        if (!matched) return RecommendationMetadata()
-
-        val chineseTitle = subject["name_cn"]
-            ?.jsonPrimitive
-            ?.contentOrNull
-            ?.takeIf { it.isNotBlank() && it != title }
-
-        val infobox = subject["infobox"]
-            ?.jsonArray
-            ?: return RecommendationMetadata(title = chineseTitle)
-
-        val authors = mutableListOf<String>()
-        val artists = mutableListOf<String>()
-        infobox.forEach { item ->
-            val entry = item.jsonObject
-            val key = entry["key"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            val values = when (val value = entry["value"]) {
-                is JsonPrimitive -> listOfNotNull(value.contentOrNull)
-                is JsonArray -> value.mapNotNull { creator ->
-                    when (creator) {
-                        is JsonPrimitive -> creator.contentOrNull
-                        is JsonObject -> creator["v"]?.jsonPrimitive?.contentOrNull
-                        else -> null
-                    }
+            val authors = mutableListOf<String>()
+            val artists = mutableListOf<String>()
+            infobox.forEach { item ->
+                val entry = item.jsonObject
+                when (entry["key"]?.jsonPrimitive?.contentOrNull.orEmpty()) {
+                    "作者", "原作" -> authors += bangumiValues(entry)
+                    "作画", "作畫" -> artists += bangumiValues(entry)
                 }
-                else -> emptyList()
-            }.filter(String::isNotBlank)
-
-            when (key) {
-                "作者", "原作" -> authors += values
-                "作画", "作畫" -> artists += values
             }
+
+            return RecommendationMetadata(
+                title = chineseTitle,
+                author = authors.distinct().joinToString(", ").takeIf(String::isNotBlank),
+                artist = artists.distinct().joinToString(", ").takeIf(String::isNotBlank),
+            )
         }
 
-        return RecommendationMetadata(
-            title = chineseTitle,
-            author = authors.distinct().joinToString(", ").takeIf(String::isNotBlank),
-            artist = artists.distinct().joinToString(", ").takeIf(String::isNotBlank),
-        )
+        return null
     }
 
-    private suspend fun resolveMangaDexMetadata(title: String): RecommendationMetadata {
+    private fun bangumiValues(entry: JsonObject): List<String> = when (val value = entry["value"]) {
+        is JsonPrimitive -> listOfNotNull(value.contentOrNull)
+        is JsonArray -> value.mapNotNull { item ->
+            when (item) {
+                is JsonPrimitive -> item.contentOrNull
+                is JsonObject -> item["v"]?.jsonPrimitive?.contentOrNull
+                else -> null
+            }
+        }
+        else -> emptyList()
+    }.filter(String::isNotBlank)
+
+    private suspend fun resolveMangaDexMetadata(title: String): RecommendationMetadata? {
         val url = MANGADEX_API.toHttpUrl().newBuilder()
             .addQueryParameter("title", title)
             .addQueryParameter("limit", "5")
@@ -447,7 +440,7 @@ abstract class AnimePlanet : KeiSource() {
         val candidates = client.get(url)
             .parseAs<JsonObject>()["data"]
             ?.jsonArray
-            ?: return RecommendationMetadata()
+            ?: return null
 
         for (candidate in candidates) {
             val manga = candidate.jsonObject
@@ -485,7 +478,7 @@ abstract class AnimePlanet : KeiSource() {
             )
         }
 
-        return RecommendationMetadata()
+        return null
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> = emptyList()
