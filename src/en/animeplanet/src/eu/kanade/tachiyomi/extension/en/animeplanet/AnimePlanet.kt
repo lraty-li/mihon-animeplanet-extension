@@ -107,11 +107,17 @@ abstract class AnimePlanet : KeiSource() {
             attributes["altTitles"]?.jsonArray?.forEach { add(it.jsonObject) }
         }
 
-        val alias = listOf("en", "ja-ro")
+        val alias = listOf("en", "ja-ro", "ja")
             .firstNotNullOfOrNull { lang ->
                 titles.firstNotNullOfOrNull { title ->
                     title[lang]?.jsonPrimitive?.contentOrNull
-                        ?.takeIf { it.isNotBlank() && it != query && !it.hasCjk() }
+                        ?.takeIf { it.isNotBlank() && it != query }
+                }
+            }
+            ?: titles.firstNotNullOfOrNull { title ->
+                title.values.firstNotNullOfOrNull { value ->
+                    value.jsonPrimitive.contentOrNull
+                        ?.takeIf { it.isNotBlank() && it != query }
                 }
             }
 
@@ -157,13 +163,16 @@ abstract class AnimePlanet : KeiSource() {
                 else -> emptyList()
             }
         }
-            .filter { alias -> alias.any { it in 'A'..'Z' || it in 'a'..'z' } }
+            .filter { it.isNotBlank() && it != query }
             .distinct()
             .take(MAX_RESOLVED_ALIASES)
     }
 
     private fun String.hasCjk() = any { char ->
-        char.code in 0x3400..0x9FFF || char.code in 0xF900..0xFAFF
+        char.code in 0x3400..0x9FFF ||
+            char.code in 0xF900..0xFAFF ||
+            char.code in 0x3040..0x30FF ||
+            char.code in 0xAC00..0xD7AF
     }
 
     private suspend fun fetchMangaListing(page: Int, query: String?): MangasPage {
