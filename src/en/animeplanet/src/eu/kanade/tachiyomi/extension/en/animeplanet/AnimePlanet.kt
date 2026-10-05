@@ -210,10 +210,10 @@ abstract class AnimePlanet : KeiSource() {
         .distinctBy { it.url }
 
     private fun parseMangaLinks(document: Document): List<SManga> = document.select("a[href^=/manga/]")
-        .mapNotNull(::mangaFromElement)
+        .mapNotNull { mangaFromElement(it, initialized = false) }
         .distinctBy { it.url }
 
-    private fun mangaFromElement(element: Element): SManga? {
+    private fun mangaFromElement(element: Element, initialized: Boolean = true): SManga? {
         val link = when {
             element.tagName() == "a" -> element
             else -> element.selectFirst("a[href^=/manga/]") ?: return null
@@ -239,7 +239,7 @@ abstract class AnimePlanet : KeiSource() {
             setUrlWithoutDomain(path)
             this.title = title
             genre = "$RECOMMENDATION_SCHEMA${path.substringAfter("/manga/")}"
-            initialized = true
+            this.initialized = initialized
             thumbnail_url = image?.let {
                 it.attr("data-src").takeIf(String::isNotBlank)
                     ?: it.attr("data-original").takeIf(String::isNotBlank)
@@ -274,6 +274,11 @@ abstract class AnimePlanet : KeiSource() {
         fetchChapters: Boolean,
     ): SMangaUpdate {
         if (!fetchDetails) {
+            return SMangaUpdate(manga, emptyList())
+        }
+
+        if (manga.title.isNotBlank() && manga.genre.orEmpty().contains(RECOMMENDATION_SCHEMA)) {
+            resolveChineseTitle(manga.title)?.let { manga.title = it }
             return SMangaUpdate(manga, emptyList())
         }
 
@@ -345,6 +350,89 @@ abstract class AnimePlanet : KeiSource() {
         }
 
         return SMangaUpdate(updated, emptyList())
+    }
+
+    private suspend fun resolveChineseTitle(title: String): String? {
+        val resolvers: List<suspend (String) -> String?> = listOf(
+            ::resolveMangaDexChineseTitle,
+            ::resolveBangumiChineseTitle,
+        )
+
+        for (resolver in resolvers) {
+            resolver(title)?.let { return it }
+        }
+
+        return null
+    }
+
+    private suspend fun resolveBangumiChineseTitle(title: String): String? {
+        val body = buildJsonObject {
+            put("keyword", title)
+            put("sort", "match")
+            putJsonObject("filter") {
+                putJsonArray("type") { add(1) }
+            }
+        }.toJsonRequestBody()
+
+        val subject = client.post("$BANGUMI_API/search/subjects?limit=1", body)
+            .parseAs<JsonObject>()["data"]
+            ?.jsonArray
+            ?.firstOrNull()
+            ?.jsonObject
+
+        val matched = subject
+            ?.get("name")
+            ?.jsonPrimitive
+            ?.contentOrNull
+            ?.equals(title, ignoreCase = true) == true ||
+            subject
+                ?.get("name_cn")
+                ?.jsonPrimitive
+                ?.contentOrNull
+                ?.equals(title, ignoreCase = true) == true
+
+        if (!matched) return null
+
+        return subject["name_cn"]
+            ?.jsonPrimitive
+            ?.contentOrNull
+            ?.takeIf { it.isNotBlank() && it != title }
+    }
+
+    private suspend fun resolveMangaDexChineseTitle(title: String): String? {
+        val url = MANGADEX_API.toHttpUrl().newBuilder()
+            .addQueryParameter("title", title)
+            .addQueryParameter("limit", "5")
+            .build()
+
+        val candidates = client.get(url)
+            .parseAs<JsonObject>()["data"]
+            ?.jsonArray
+            ?: return null
+
+        for (candidate in candidates) {
+            val attributes = candidate.jsonObject["attributes"]?.jsonObject ?: continue
+            val titles = buildList {
+                attributes["title"]?.jsonObject?.let(::add)
+                attributes["altTitles"]?.jsonArray?.forEach { add(it.jsonObject) }
+            }
+
+            val exactMatch = titles.any { localizedTitles ->
+                localizedTitles.values.any { value ->
+                    value.jsonPrimitive.contentOrNull?.equals(title, ignoreCase = true) == true
+                }
+            }
+            if (!exactMatch) continue
+
+            return titles.firstNotNullOfOrNull { localizedTitles ->
+                localizedTitles.entries.firstNotNullOfOrNull { (language, value) ->
+                    value.jsonPrimitive.contentOrNull
+                        ?.takeIf { language.startsWith("zh") && it.isNotBlank() }
+                }
+            }
+        }
+
+        return null
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> = emptyList()
